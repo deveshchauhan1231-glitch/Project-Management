@@ -1,0 +1,4 @@
+:root { font-family:'Poppins', sans-serif; font-synthesis:none; text-rendering:optimizeLegibility; -webkit-font-smoothing:antialiased; }
+body { margin:0; }
+button,input,textarea,select { font:inherit; }
+button:focus-visible,input:focus-visible,textarea:focus-visible,select:focus-visible { outline:2px solid #88a94e; outline-offset:2px; }
