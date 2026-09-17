@@ -1,74 +1,102 @@
 import 'dotenv/config';
 import cors from 'cors';
 import express from 'express';
-import { Pool } from 'pg';
+import { PrismaClient } from '@prisma/client';
 const app = express();
 const port = Number(process.env.PORT ?? 4000);
-const pool = new Pool({ connectionString: process.env.DATABASE_URL });
+const prisma = new PrismaClient();
 app.use(cors());
 app.use(express.json());
-const logActivity = async (projectId, message, actor = 'You') => {
-    await pool.query('INSERT INTO activity (project_id, message, actor) VALUES ($1, $2, $3)', [projectId, message, actor]);
+const projectResponse = (project) => ({
+    id: project.id,
+    title: project.title,
+    description: project.description,
+    status: project.status,
+    deadline: project.deadline?.toISOString().slice(0, 10) ?? null,
+});
+const taskResponse = (task) => ({
+    id: task.id,
+    project_id: task.projectId,
+    title: task.title,
+    status: task.status,
+    priority: task.priority,
+    assignees: task.assignees,
+});
+const logActivity = async (projectId, message, actor = 'Unknown user') => {
+    await prisma.activity.create({ data: { projectId, message, actor } });
 };
 app.get('/api/health', (_req, res) => res.json({ ok: true }));
 app.get('/api/projects', async (_req, res) => {
-    const result = await pool.query(`
-    SELECT p.*, COUNT(t.id)::int AS task_count,
-      COUNT(t.id) FILTER (WHERE t.status = 'Done')::int AS completed_tasks
-    FROM projects p LEFT JOIN tasks t ON t.project_id = p.id
-    GROUP BY p.id ORDER BY p.updated_at DESC
-  `);
-    res.json(result.rows);
+    const projects = await prisma.project.findMany({
+        orderBy: { updatedAt: 'desc' },
+        include: { _count: { select: { tasks: true } } },
+    });
+    res.json(projects.map((project) => ({ ...projectResponse(project), task_count: project._count.tasks })));
 });
 app.post('/api/projects', async (req, res) => {
     const { title, description = '', status = 'Planning', deadline = null, actor = 'Unknown user' } = req.body;
-    const result = await pool.query('INSERT INTO projects (title, description, status, deadline) VALUES ($1, $2, $3, $4) RETURNING *', [title, description, status, deadline]);
-    await logActivity(result.rows[0].id, `Project ${title} was created`, actor);
-    res.status(201).json(result.rows[0]);
+    const project = await prisma.project.create({ data: { title, description, status: status, deadline: deadline ? new Date(deadline) : null } });
+    await logActivity(project.id, `Project ${title} was created`, actor);
+    res.status(201).json(projectResponse(project));
 });
 app.patch('/api/projects/:id', async (req, res) => {
     const { title, description, status, deadline, actor = 'Unknown user' } = req.body;
-    const result = await pool.query('UPDATE projects SET title = COALESCE($1, title), description = COALESCE($2, description), status = COALESCE($3, status), deadline = $4, updated_at = NOW() WHERE id = $5 RETURNING *', [title, description, status, deadline, req.params.id]);
-    if (!result.rowCount)
-        return res.status(404).json({ error: 'Project not found' });
-    await logActivity(req.params.id, `Project ${result.rows[0].title} was edited`, actor);
-    res.json(result.rows[0]);
+    try {
+        const project = await prisma.project.update({ where: { id: req.params.id }, data: { title, description, status: status, deadline: deadline ? new Date(deadline) : null } });
+        await logActivity(project.id, `Project ${project.title} was edited`, actor);
+        res.json(projectResponse(project));
+    }
+    catch {
+        res.status(404).json({ error: 'Project not found' });
+    }
 });
 app.delete('/api/projects/:id', async (req, res) => {
     const { actor = 'Unknown user' } = req.body;
-    const result = await pool.query('DELETE FROM projects WHERE id = $1 RETURNING title', [req.params.id]);
-    if (!result.rowCount)
-        return res.status(404).json({ error: 'Project not found' });
-    await logActivity(null, `Project ${result.rows[0].title} was deleted`, actor);
-    res.status(204).send();
+    try {
+        const project = await prisma.project.findUniqueOrThrow({ where: { id: req.params.id } });
+        await prisma.project.delete({ where: { id: req.params.id } });
+        await logActivity(null, `Project ${project.title} was deleted`, actor);
+        res.status(204).send();
+    }
+    catch {
+        res.status(404).json({ error: 'Project not found' });
+    }
 });
 app.get('/api/projects/:id/tasks', async (req, res) => {
-    const result = await pool.query('SELECT * FROM tasks WHERE project_id = $1 ORDER BY created_at DESC', [req.params.id]);
-    res.json(result.rows);
+    const tasks = await prisma.task.findMany({ where: { projectId: req.params.id }, orderBy: { createdAt: 'desc' } });
+    res.json(tasks.map(taskResponse));
 });
 app.post('/api/projects/:id/tasks', async (req, res) => {
     const { title, status = 'To do', priority = 'Medium', assignees = [], actor = 'Unknown user' } = req.body;
-    const result = await pool.query('INSERT INTO tasks (project_id, title, status, priority, assignees) VALUES ($1, $2, $3, $4, $5) RETURNING *', [req.params.id, title, status, priority, assignees]);
+    const task = await prisma.task.create({ data: { projectId: req.params.id, title, status: status, priority: priority, assignees } });
     await logActivity(req.params.id, `Task ${title} was added`, actor);
-    res.status(201).json(result.rows[0]);
+    res.status(201).json(taskResponse(task));
 });
 app.patch('/api/tasks/:id', async (req, res) => {
     const { title, status, priority, assignees, actor = 'Unknown user' } = req.body;
-    const result = await pool.query('UPDATE tasks SET title = COALESCE($1, title), status = COALESCE($2, status), priority = COALESCE($3, priority), assignees = COALESCE($4, assignees), updated_at = NOW() WHERE id = $5 RETURNING *', [title, status, priority, assignees, req.params.id]);
-    if (!result.rowCount)
-        return res.status(404).json({ error: 'Task not found' });
-    await logActivity(result.rows[0].project_id, `Task ${result.rows[0].title} was edited`, actor);
-    res.json(result.rows[0]);
+    try {
+        const task = await prisma.task.update({ where: { id: req.params.id }, data: { title, status: status, priority: priority, assignees } });
+        await logActivity(task.projectId, `Task ${task.title} was edited`, actor);
+        res.json(taskResponse(task));
+    }
+    catch {
+        res.status(404).json({ error: 'Task not found' });
+    }
 });
 app.delete('/api/tasks/:id', async (req, res) => {
     const { actor = 'Unknown user' } = req.body;
-    const result = await pool.query('DELETE FROM tasks WHERE id = $1 RETURNING project_id, title', [req.params.id]);
-    if (result.rowCount)
-        await logActivity(result.rows[0].project_id, `Task ${result.rows[0].title} was deleted`, actor);
-    res.status(204).send();
+    try {
+        const task = await prisma.task.findUniqueOrThrow({ where: { id: req.params.id } });
+        await prisma.task.delete({ where: { id: req.params.id } });
+        await logActivity(task.projectId, `Task ${task.title} was deleted`, actor);
+        res.status(204).send();
+    }
+    catch {
+        res.status(404).json({ error: 'Task not found' });
+    }
 });
 app.get('/api/activity', async (_req, res) => {
-    const result = await pool.query('SELECT * FROM activity ORDER BY created_at DESC LIMIT 20');
-    res.json(result.rows);
+    const activity = await prisma.activity.findMany({ orderBy: { createdAt: 'desc' }, take: 20 });
+    res.json(activity.map((item) => ({ id: item.id, message: item.message, actor: item.actor, created_at: item.createdAt })));
 });
-app.listen(port, () => console.log(`Project Pulse API running on http://localhost:${port}`));
+app.listen(port, () => console.log(`Project Manager API running on http://localhost:${port}`));
