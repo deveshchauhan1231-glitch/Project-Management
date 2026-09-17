@@ -7,6 +7,8 @@ type Activity = { id: string; message: string; actor: string; created_at: string
 
 const emptyProject = { title: '', description: '', status: 'Planning', deadline: '' }
 const emptyTask = { title: '', status: 'To do', priority: 'Medium', assignees: '' }
+const apiUrl = import.meta.env.VITE_API_URL ?? ''
+const api = (path: string) => `${apiUrl}${path}`
 
 function App() {
   const [projects, setProjects] = useState<Project[]>([])
@@ -21,9 +23,9 @@ function App() {
   const [showTaskForm, setShowTaskForm] = useState(false)
   const [error, setError] = useState('')
 
-  const loadActivity = () => fetch('/api/activity').then((response) => response.json()).then(setActivity).catch(() => {})
-  const loadProjects = () => fetch('/api/projects').then((response) => { if (!response.ok) throw new Error('Could not connect to the server.'); return response.json() }).then((items: Project[]) => { setProjects(items); if (items.length && !selectedProject) selectProject(items[0]) }).catch((reason: Error) => setError(reason.message))
-  const selectProject = (project: Project) => { setSelectedProject(project); fetch(`/api/projects/${project.id}/tasks`).then((response) => response.json()).then(setTasks).catch(() => setTasks([])) }
+  const loadActivity = () => fetch(api('/api/activity')).then((response) => response.json()).then(setActivity).catch(() => {})
+  const loadProjects = () => fetch(api('/api/projects')).then((response) => { if (!response.ok) throw new Error('Could not connect to the server.'); return response.json() }).then((items: Project[]) => { setProjects(items); if (items.length && !selectedProject) selectProject(items[0]) }).catch((reason: Error) => setError(reason.message))
+  const selectProject = (project: Project) => { setSelectedProject(project); fetch(api(`/api/projects/${project.id}/tasks`)).then((response) => response.json()).then(setTasks).catch(() => setTasks([])) }
 
   useEffect(() => { loadProjects(); loadActivity() }, [])
 
@@ -31,20 +33,20 @@ function App() {
 
   const saveProject = async (event: FormEvent) => {
     event.preventDefault(); setError(''); const actor = askForName(); if (!actor) return
-    const response = await fetch(editingProject && selectedProject ? `/api/projects/${selectedProject.id}` : '/api/projects', { method: editingProject ? 'PATCH' : 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ...projectForm, actor }) })
+    const response = await fetch(api(editingProject && selectedProject ? `/api/projects/${selectedProject.id}` : '/api/projects'), { method: editingProject ? 'PATCH' : 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ ...projectForm, actor }) })
     if (!response.ok) { setError('Could not save the project.'); return }
     const saved = await response.json(); setProjects(editingProject ? projects.map((item) => item.id === saved.id ? saved : item) : [saved, ...projects]); setSelectedProject(saved); setProjectForm(emptyProject); setShowProjectForm(false); setEditingProject(false); loadActivity()
   }
 
-  const removeProject = async (project: Project) => { if (!window.confirm(`Delete ${project.title}?`)) return; const actor = askForName(); if (!actor) return; await fetch(`/api/projects/${project.id}`, { method: 'DELETE', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ actor }) }); const remaining = projects.filter((item) => item.id !== project.id); setProjects(remaining); setSelectedProject(remaining[0] ?? null); setTasks([]); loadActivity() }
+  const removeProject = async (project: Project) => { if (!window.confirm(`Delete ${project.title}?`)) return; const actor = askForName(); if (!actor) return; await fetch(api(`/api/projects/${project.id}`), { method: 'DELETE', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ actor }) }); const remaining = projects.filter((item) => item.id !== project.id); setProjects(remaining); setSelectedProject(remaining[0] ?? null); setTasks([]); loadActivity() }
   const saveTask = async (event: FormEvent) => {
     event.preventDefault(); if (!selectedProject) return; const actor = askForName(); if (!actor) return
     const payload = { title: taskForm.title, status: taskForm.status, priority: taskForm.priority, assignees: taskForm.assignees.split(',').map((name) => name.trim()).filter(Boolean), actor }
-    const response = await fetch(editingTask ? `/api/tasks/${editingTask.id}` : `/api/projects/${selectedProject.id}/tasks`, { method: editingTask ? 'PATCH' : 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) })
+    const response = await fetch(api(editingTask ? `/api/tasks/${editingTask.id}` : `/api/projects/${selectedProject.id}/tasks`), { method: editingTask ? 'PATCH' : 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) })
     if (!response.ok) { setError('Could not save the task.'); return }
     const saved = await response.json(); setTasks(editingTask ? tasks.map((item) => item.id === saved.id ? saved : item) : [saved, ...tasks]); setTaskForm(emptyTask); setShowTaskForm(false); setEditingTask(null); loadActivity()
   }
-  const removeTask = async (task: Task) => { if (!window.confirm(`Delete ${task.title}?`)) return; const actor = askForName(); if (!actor) return; await fetch(`/api/tasks/${task.id}`, { method: 'DELETE', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ actor }) }); setTasks(tasks.filter((item) => item.id !== task.id)); loadActivity() }
+  const removeTask = async (task: Task) => { if (!window.confirm(`Delete ${task.title}?`)) return; const actor = askForName(); if (!actor) return; await fetch(api(`/api/tasks/${task.id}`), { method: 'DELETE', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ actor }) }); setTasks(tasks.filter((item) => item.id !== task.id)); loadActivity() }
   const beginEditProject = () => { if (!selectedProject) return; setProjectForm({ title: selectedProject.title, description: selectedProject.description, status: selectedProject.status, deadline: selectedProject.deadline ?? '' }); setEditingProject(true); setShowProjectForm(true) }
   const beginEditTask = (task: Task) => { setEditingTask(task); setTaskForm({ title: task.title, status: task.status, priority: task.priority, assignees: task.assignees.join(', ') }); setShowTaskForm(true) }
 
