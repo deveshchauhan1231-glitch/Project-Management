@@ -17,8 +17,7 @@ import {
   History,
   CheckCircle2,
   Clock,
-  AlertCircle,
-  LogIn
+  AlertCircle
 } from 'lucide-react'
 import type {
   Activity,
