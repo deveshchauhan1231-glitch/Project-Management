@@ -3,6 +3,9 @@
 :root { --border:#e1e5e2; --muted:#718078; --text:#27332e; --green:#d8e98b; --soft:#f6f8f5; }
 * { box-sizing:border-box; }
 .app { min-height:100vh; background:#fff; color:var(--text); font-size:14px; }
+.toast { position:fixed; top:20px; right:20px; z-index:10; min-width:240px; padding:12px 16px; border-radius:4px; color:#fff; box-shadow:0 5px 18px #26332e2e; font-size:13px; }
+.toast.success { background:#4f8664; }
+.toast.error { background:#b04c4c; }
 .topbar { display:flex; justify-content:space-between; align-items:center; border-bottom:1px solid var(--border); padding:20px 6%; }
 h1,h2,h3,p { margin:0; } h1 { font-size:21px; font-weight:600; } h2 { font-size:20px; font-weight:500; } h3 { font-size:16px; font-weight:500; }
 .button { border:1px solid #ccd5ce; background:#fff; color:var(--text); border-radius:4px; padding:8px 13px; cursor:pointer; font-size:13px; }

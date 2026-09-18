@@ -1,24 +1,29 @@
 import 'dotenv/config';
 import cors from 'cors';
 import express from 'express';
-import { PrismaClient } from '@prisma/client';
+import { PrismaClient, ProjectStatus, TaskStatus } from '@prisma/client';
 const app = express();
 const port = Number(process.env.PORT ?? 4000);
 const prisma = new PrismaClient();
 app.use(cors());
 app.use(express.json());
+const projectStatus = (value) => value === 'In progress' || value === 'InProgress' ? ProjectStatus.InProgress : value;
+const taskStatus = (value) => value === 'In progress' || value === 'InProgress' ? TaskStatus.InProgress : value === 'To do' || value === 'ToDo' ? TaskStatus.ToDo : value;
+const displayProjectStatus = (value) => value === ProjectStatus.InProgress ? 'In progress' : value;
+const displayTaskStatus = (value) => value === TaskStatus.InProgress ? 'In progress' : value === TaskStatus.ToDo ? 'To do' : value;
+const actorName = (value) => typeof value === 'string' && value.trim() ? value.trim() : 'Unknown user';
 const projectResponse = (project) => ({
     id: project.id,
     title: project.title,
     description: project.description,
-    status: project.status,
+    status: displayProjectStatus(project.status),
     deadline: project.deadline?.toISOString().slice(0, 10) ?? null,
 });
 const taskResponse = (task) => ({
     id: task.id,
     project_id: task.projectId,
     title: task.title,
-    status: task.status,
+    status: displayTaskStatus(task.status),
     priority: task.priority,
     assignees: task.assignees,
 });
@@ -35,15 +40,15 @@ app.get('/api/projects', async (_req, res) => {
 });
 app.post('/api/projects', async (req, res) => {
     const { title, description = '', status = 'Planning', deadline = null, actor = 'Unknown user' } = req.body;
-    const project = await prisma.project.create({ data: { title, description, status: status, deadline: deadline ? new Date(deadline) : null } });
-    await logActivity(project.id, `Project ${title} was created`, actor);
+    const project = await prisma.project.create({ data: { title, description, status: projectStatus(status), deadline: deadline ? new Date(deadline) : null } });
+    await logActivity(project.id, `Project ${title} was created`, actorName(actor));
     res.status(201).json(projectResponse(project));
 });
 app.patch('/api/projects/:id', async (req, res) => {
     const { title, description, status, deadline, actor = 'Unknown user' } = req.body;
     try {
-        const project = await prisma.project.update({ where: { id: req.params.id }, data: { title, description, status: status, deadline: deadline ? new Date(deadline) : null } });
-        await logActivity(project.id, `Project ${project.title} was edited`, actor);
+        const project = await prisma.project.update({ where: { id: req.params.id }, data: { title, description, status: projectStatus(status), deadline: deadline ? new Date(deadline) : null } });
+        await logActivity(project.id, `Project ${project.title} was edited`, actorName(actor));
         res.json(projectResponse(project));
     }
     catch {
@@ -55,7 +60,7 @@ app.delete('/api/projects/:id', async (req, res) => {
     try {
         const project = await prisma.project.findUniqueOrThrow({ where: { id: req.params.id } });
         await prisma.project.delete({ where: { id: req.params.id } });
-        await logActivity(null, `Project ${project.title} was deleted`, actor);
+        await logActivity(null, `Project ${project.title} was deleted`, actorName(actor));
         res.status(204).send();
     }
     catch {
@@ -68,15 +73,15 @@ app.get('/api/projects/:id/tasks', async (req, res) => {
 });
 app.post('/api/projects/:id/tasks', async (req, res) => {
     const { title, status = 'To do', priority = 'Medium', assignees = [], actor = 'Unknown user' } = req.body;
-    const task = await prisma.task.create({ data: { projectId: req.params.id, title, status: status, priority: priority, assignees } });
-    await logActivity(req.params.id, `Task ${title} was added`, actor);
+    const task = await prisma.task.create({ data: { projectId: req.params.id, title, status: taskStatus(status), priority: priority, assignees } });
+    await logActivity(req.params.id, `Task ${title} was added`, actorName(actor));
     res.status(201).json(taskResponse(task));
 });
 app.patch('/api/tasks/:id', async (req, res) => {
     const { title, status, priority, assignees, actor = 'Unknown user' } = req.body;
     try {
-        const task = await prisma.task.update({ where: { id: req.params.id }, data: { title, status: status, priority: priority, assignees } });
-        await logActivity(task.projectId, `Task ${task.title} was edited`, actor);
+        const task = await prisma.task.update({ where: { id: req.params.id }, data: { title, status: taskStatus(status), priority: priority, assignees } });
+        await logActivity(task.projectId, `Task ${task.title} was edited`, actorName(actor));
         res.json(taskResponse(task));
     }
     catch {
@@ -88,7 +93,7 @@ app.delete('/api/tasks/:id', async (req, res) => {
     try {
         const task = await prisma.task.findUniqueOrThrow({ where: { id: req.params.id } });
         await prisma.task.delete({ where: { id: req.params.id } });
-        await logActivity(task.projectId, `Task ${task.title} was deleted`, actor);
+        await logActivity(task.projectId, `Task ${task.title} was deleted`, actorName(actor));
         res.status(204).send();
     }
     catch {
