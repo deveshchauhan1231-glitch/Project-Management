@@ -1,5 +1,5 @@
 import { useUser, SignInButton, SignUpButton } from '@clerk/clerk-react';
-import { LogIn, User } from 'lucide-react';
+import { LogIn } from 'lucide-react';
 
 type NavBarProps = {
   isGuest: boolean;
@@ -7,7 +7,7 @@ type NavBarProps = {
   onToggleGuest: () => void;
 };
 
-export function NavBar({ isGuest, guestName, onToggleGuest }: NavBarProps) {
+export function NavBar({ isGuest, onToggleGuest }: NavBarProps) {
   const { isSignedIn } = useUser();
 
   const isUserAuthenticated = Boolean(isSignedIn);
