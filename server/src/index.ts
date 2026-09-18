@@ -1,6 +1,7 @@
 import 'dotenv/config'
 import cors from 'cors'
-import express from 'express'
+import express, { type Request, type Response } from 'express'
+import { clerkMiddleware, getAuth } from '@clerk/express'
 import { PrismaClient, Priority, ProjectStatus, TaskStatus } from '@prisma/client'
 
 const app = express()
@@ -10,13 +11,71 @@ const prisma = new PrismaClient()
 app.use(cors())
 app.use(express.json())
 
-const projectStatus = (value: string): ProjectStatus => value === 'In progress' || value === 'InProgress' ? ProjectStatus.InProgress : value as ProjectStatus
-const taskStatus = (value: string): TaskStatus => value === 'In progress' || value === 'InProgress' ? TaskStatus.InProgress : value === 'To do' || value === 'ToDo' ? TaskStatus.ToDo : value as TaskStatus
-const displayProjectStatus = (value: ProjectStatus) => value === ProjectStatus.InProgress ? 'In progress' : value
-const displayTaskStatus = (value: TaskStatus) => value === TaskStatus.InProgress ? 'In progress' : value === TaskStatus.ToDo ? 'To do' : value
-const actorName = (value: unknown) => typeof value === 'string' && value.trim() ? value.trim() : 'Unknown user'
+// Enable Clerk authentication middleware if secret key is present
+const hasClerkSecret = Boolean(process.env.CLERK_SECRET_KEY || process.env.CLERK_PUBLISHABLE_KEY)
+if (hasClerkSecret) {
+  app.use(clerkMiddleware())
+}
 
-const projectResponse = (project: { id: string; title: string; description: string; status: ProjectStatus; deadline: Date | null }) => ({
+const getParam = (val: string | string[] | undefined): string => {
+  if (Array.isArray(val)) return val[0] ?? ''
+  return val ?? ''
+}
+
+// Status parsing helpers
+const projectStatus = (value: string): ProjectStatus =>
+  value === 'In progress' || value === 'InProgress' ? ProjectStatus.InProgress : (value as ProjectStatus)
+
+const taskStatus = (value: string): TaskStatus =>
+  value === 'In progress' || value === 'InProgress'
+    ? TaskStatus.InProgress
+    : value === 'To do' || value === 'ToDo'
+    ? TaskStatus.ToDo
+    : (value as TaskStatus)
+
+const displayProjectStatus = (value: ProjectStatus) =>
+  value === ProjectStatus.InProgress ? 'In progress' : value
+
+const displayTaskStatus = (value: TaskStatus) =>
+  value === TaskStatus.InProgress ? 'In progress' : value === TaskStatus.ToDo ? 'To do' : value
+
+// Resolve actor name from Clerk Auth, headers, or body
+const resolveActor = (req: Request): string => {
+  if (hasClerkSecret) {
+    try {
+      const auth = getAuth(req)
+      if (auth.userId) {
+        const headerActor = req.headers['x-actor-name']
+        if (typeof headerActor === 'string' && headerActor.trim()) {
+          return headerActor.trim()
+        }
+        return `User (${auth.userId.slice(-6)})`
+      }
+    } catch {
+      // Fallback
+    }
+  }
+
+  const headerActor = req.headers['x-actor-name']
+  if (typeof headerActor === 'string' && headerActor.trim()) {
+    return headerActor.trim()
+  }
+
+  const bodyActor = req.body?.actor
+  if (typeof bodyActor === 'string' && bodyActor.trim()) {
+    return bodyActor.trim()
+  }
+
+  return 'Workspace Member'
+}
+
+const projectResponse = (project: {
+  id: string
+  title: string
+  description: string
+  status: ProjectStatus
+  deadline: Date | null
+}) => ({
   id: project.id,
   title: project.title,
   description: project.description,
@@ -24,7 +83,14 @@ const projectResponse = (project: { id: string; title: string; description: stri
   deadline: project.deadline?.toISOString().slice(0, 10) ?? null,
 })
 
-const taskResponse = (task: { id: string; projectId: string; title: string; status: TaskStatus; priority: Priority; assignees: string[] }) => ({
+const taskResponse = (task: {
+  id: string
+  projectId: string
+  title: string
+  status: TaskStatus
+  priority: Priority
+  assignees: string[]
+}) => ({
   id: task.id,
   project_id: task.projectId,
   title: task.title,
@@ -33,80 +99,197 @@ const taskResponse = (task: { id: string; projectId: string; title: string; stat
   assignees: task.assignees,
 })
 
-const logActivity = async (projectId: string | null, message: string, actor = 'Unknown user') => {
-  await prisma.activity.create({ data: { projectId, message, actor } })
+const logActivity = async (projectId: string | null, message: string, actor = 'Workspace Member') => {
+  try {
+    await prisma.activity.create({ data: { projectId, message, actor } })
+  } catch (error) {
+    console.error('Failed to write activity log:', error)
+  }
 }
 
-app.get('/api/health', (_req, res) => res.json({ ok: true }))
-
-app.get('/api/projects', async (_req, res) => {
-  const projects = await prisma.project.findMany({
-    orderBy: { updatedAt: 'desc' },
-    include: { _count: { select: { tasks: true } } },
+// Health check
+app.get('/api/health', (_req: Request, res: Response) => {
+  res.json({
+    status: 'ok',
+    timestamp: new Date().toISOString(),
+    clerk_enabled: hasClerkSecret,
   })
-  res.json(projects.map((project) => ({ ...projectResponse(project), task_count: project._count.tasks })))
 })
 
-app.post('/api/projects', async (req, res) => {
-  const { title, description = '', status = 'Planning', deadline = null, actor = 'Unknown user' } = req.body
-  const project = await prisma.project.create({ data: { title, description, status: projectStatus(status), deadline: deadline ? new Date(deadline) : null } })
-  await logActivity(project.id, `Project ${title} was created`, actorName(actor))
-  res.status(201).json(projectResponse(project))
-})
-
-app.patch('/api/projects/:id', async (req, res) => {
-  const { title, description, status, deadline, actor = 'Unknown user' } = req.body
+// Projects Endpoints
+app.get('/api/projects', async (_req: Request, res: Response) => {
   try {
-    const project = await prisma.project.update({ where: { id: req.params.id }, data: { title, description, status: projectStatus(status), deadline: deadline ? new Date(deadline) : null } })
-    await logActivity(project.id, `Project ${project.title} was edited`, actorName(actor))
+    const projects = await prisma.project.findMany({
+      orderBy: { updatedAt: 'desc' },
+      include: { _count: { select: { tasks: true } } },
+    })
+    res.json(projects.map((project) => ({ ...projectResponse(project), task_count: project._count.tasks })))
+  } catch (error) {
+    console.error('Error fetching projects:', error)
+    res.status(500).json({ error: 'Failed to retrieve projects' })
+  }
+})
+
+app.post('/api/projects', async (req: Request, res: Response) => {
+  try {
+    const { title, description = '', status = 'Planning', deadline = null } = req.body
+    if (!title || typeof title !== 'string') {
+      res.status(400).json({ error: 'Project title is required' })
+      return
+    }
+
+    const actor = resolveActor(req)
+    const project = await prisma.project.create({
+      data: {
+        title: title.trim(),
+        description: description.trim(),
+        status: projectStatus(status),
+        deadline: deadline ? new Date(deadline) : null,
+      },
+    })
+
+    await logActivity(project.id, `Project "${project.title}" was created`, actor)
+    res.status(201).json(projectResponse(project))
+  } catch (error) {
+    console.error('Error creating project:', error)
+    res.status(500).json({ error: 'Failed to create project' })
+  }
+})
+
+app.patch('/api/projects/:id', async (req: Request, res: Response) => {
+  const projectId = getParam(req.params.id)
+  try {
+    const { title, description, status, deadline } = req.body
+    const actor = resolveActor(req)
+
+    const project = await prisma.project.update({
+      where: { id: projectId },
+      data: {
+        ...(title !== undefined && { title: title.trim() }),
+        ...(description !== undefined && { description: description.trim() }),
+        ...(status !== undefined && { status: projectStatus(status) }),
+        ...(deadline !== undefined && { deadline: deadline ? new Date(deadline) : null }),
+      },
+    })
+
+    await logActivity(project.id, `Project "${project.title}" was updated`, actor)
     res.json(projectResponse(project))
-  } catch { res.status(404).json({ error: 'Project not found' }) }
+  } catch {
+    res.status(404).json({ error: 'Project not found' })
+  }
 })
 
-app.delete('/api/projects/:id', async (req, res) => {
-  const { actor = 'Unknown user' } = req.body
+app.delete('/api/projects/:id', async (req: Request, res: Response) => {
+  const projectId = getParam(req.params.id)
   try {
-    const project = await prisma.project.findUniqueOrThrow({ where: { id: req.params.id } })
-    await prisma.project.delete({ where: { id: req.params.id } })
-    await logActivity(null, `Project ${project.title} was deleted`, actorName(actor))
+    const actor = resolveActor(req)
+    const project = await prisma.project.findUniqueOrThrow({ where: { id: projectId } })
+    await prisma.project.delete({ where: { id: projectId } })
+    await logActivity(null, `Project "${project.title}" was deleted`, actor)
     res.status(204).send()
-  } catch { res.status(404).json({ error: 'Project not found' }) }
+  } catch {
+    res.status(404).json({ error: 'Project not found' })
+  }
 })
 
-app.get('/api/projects/:id/tasks', async (req, res) => {
-  const tasks = await prisma.task.findMany({ where: { projectId: req.params.id }, orderBy: { createdAt: 'desc' } })
-  res.json(tasks.map(taskResponse))
-})
-
-app.post('/api/projects/:id/tasks', async (req, res) => {
-  const { title, status = 'To do', priority = 'Medium', assignees = [], actor = 'Unknown user' } = req.body
-  const task = await prisma.task.create({ data: { projectId: req.params.id, title, status: taskStatus(status), priority: priority as Priority, assignees } })
-  await logActivity(req.params.id, `Task ${title} was added`, actorName(actor))
-  res.status(201).json(taskResponse(task))
-})
-
-app.patch('/api/tasks/:id', async (req, res) => {
-  const { title, status, priority, assignees, actor = 'Unknown user' } = req.body
+// Tasks Endpoints
+app.get('/api/projects/:id/tasks', async (req: Request, res: Response) => {
+  const projectId = getParam(req.params.id)
   try {
-    const task = await prisma.task.update({ where: { id: req.params.id }, data: { title, status: taskStatus(status), priority: priority as Priority, assignees } })
-    await logActivity(task.projectId, `Task ${task.title} was edited`, actorName(actor))
+    const tasks = await prisma.task.findMany({
+      where: { projectId },
+      orderBy: { createdAt: 'desc' },
+    })
+    res.json(tasks.map(taskResponse))
+  } catch (error) {
+    console.error('Error fetching tasks:', error)
+    res.status(500).json({ error: 'Failed to retrieve tasks' })
+  }
+})
+
+app.post('/api/projects/:id/tasks', async (req: Request, res: Response) => {
+  const projectId = getParam(req.params.id)
+  try {
+    const { title, status = 'To do', priority = 'Medium', assignees = [] } = req.body
+    if (!title || typeof title !== 'string') {
+      res.status(400).json({ error: 'Task title is required' })
+      return
+    }
+
+    const actor = resolveActor(req)
+    const task = await prisma.task.create({
+      data: {
+        projectId,
+        title: title.trim(),
+        status: taskStatus(status),
+        priority: priority as Priority,
+        assignees: Array.isArray(assignees) ? assignees : [],
+      },
+    })
+
+    await logActivity(projectId, `Task "${task.title}" was added`, actor)
+    res.status(201).json(taskResponse(task))
+  } catch (error) {
+    console.error('Error creating task:', error)
+    res.status(500).json({ error: 'Failed to create task' })
+  }
+})
+
+app.patch('/api/tasks/:id', async (req: Request, res: Response) => {
+  const taskId = getParam(req.params.id)
+  try {
+    const { title, status, priority, assignees } = req.body
+    const actor = resolveActor(req)
+
+    const task = await prisma.task.update({
+      where: { id: taskId },
+      data: {
+        ...(title !== undefined && { title: title.trim() }),
+        ...(status !== undefined && { status: taskStatus(status) }),
+        ...(priority !== undefined && { priority: priority as Priority }),
+        ...(assignees !== undefined && { assignees: Array.isArray(assignees) ? assignees : [] }),
+      },
+    })
+
+    await logActivity(task.projectId, `Task "${task.title}" was updated`, actor)
     res.json(taskResponse(task))
-  } catch { res.status(404).json({ error: 'Task not found' }) }
+  } catch {
+    res.status(404).json({ error: 'Task not found' })
+  }
 })
 
-app.delete('/api/tasks/:id', async (req, res) => {
-  const { actor = 'Unknown user' } = req.body
+app.delete('/api/tasks/:id', async (req: Request, res: Response) => {
+  const taskId = getParam(req.params.id)
   try {
-    const task = await prisma.task.findUniqueOrThrow({ where: { id: req.params.id } })
-    await prisma.task.delete({ where: { id: req.params.id } })
-    await logActivity(task.projectId, `Task ${task.title} was deleted`, actorName(actor))
+    const actor = resolveActor(req)
+    const task = await prisma.task.findUniqueOrThrow({ where: { id: taskId } })
+    await prisma.task.delete({ where: { id: taskId } })
+    await logActivity(task.projectId, `Task "${task.title}" was deleted`, actor)
     res.status(204).send()
-  } catch { res.status(404).json({ error: 'Task not found' }) }
+  } catch {
+    res.status(404).json({ error: 'Task not found' })
+  }
 })
 
-app.get('/api/activity', async (_req, res) => {
-  const activity = await prisma.activity.findMany({ orderBy: { createdAt: 'desc' }, take: 20 })
-  res.json(activity.map((item) => ({ id: item.id, message: item.message, actor: item.actor, created_at: item.createdAt })))
+// Activity Timeline Endpoint
+app.get('/api/activity', async (_req: Request, res: Response) => {
+  try {
+    const activity = await prisma.activity.findMany({
+      orderBy: { createdAt: 'desc' },
+      take: 30,
+    })
+    res.json(
+      activity.map((item) => ({
+        id: item.id,
+        message: item.message,
+        actor: item.actor,
+        created_at: item.createdAt,
+      }))
+    )
+  } catch (error) {
+    console.error('Error fetching activity:', error)
+    res.status(500).json({ error: 'Failed to retrieve activity' })
+  }
 })
 
 app.listen(port, () => console.log(`Project Manager API running on http://localhost:${port}`))
